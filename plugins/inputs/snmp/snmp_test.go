@@ -97,6 +97,7 @@ func TestSampleConfig(t *testing.T) {
 		Community:      "public",
 		MaxRepetitions: 10,
 		Retries:        3,
+		Workers:        2,
 
 		Name: "system",
 		Fields: []Field{

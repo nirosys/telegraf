@@ -25,6 +25,10 @@ const sampleConfig = `
   timeout = "5s"
   ## Number of retries to attempt within timeout.
   retries = 3
+
+  ## Number of workers for multi-agent concurrency
+  workers = 2
+
   ## SNMP version, values can be 1, 2, or 3
   version = 2
 
@@ -103,6 +107,10 @@ type Snmp struct {
 	// Timeout to wait for a response.
 	Timeout internal.Duration
 	Retries int
+
+	// Configurable # of workers for agent-level concurrency.
+	Workers int
+
 	// Values: 1, 2, 3
 	Version uint8
 
