@@ -389,7 +389,6 @@ func (s *Snmp) Gather(acc telegraf.Accumulator) error {
 			} else {
 				rt := r.Result
 				for _, tr := range rt.Rows {
-					log.Printf("Adding %s: %+v (tags: %s) (time: %s)", rt.Name, tr.Fields, tr.Tags, rt.Time.String())
 					acc.AddFields(rt.Name, tr.Fields, tr.Tags, rt.Time)
 				}
 			}
