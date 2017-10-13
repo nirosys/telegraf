@@ -3,6 +3,7 @@ package snmp
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"os/exec"
@@ -162,6 +163,10 @@ func (s *Snmp) init() error {
 		if err := s.Fields[i].init(); err != nil {
 			return Errorf(err, "initializing field %s", s.Fields[i].Name)
 		}
+	}
+
+	if s.Workers == 0 {
+		s.Workers = 1
 	}
 
 	s.initialized = true
@@ -350,59 +355,68 @@ func (s *Snmp) Gather(acc telegraf.Accumulator) error {
 		return err
 	}
 
-	for _, agent := range s.Agents {
-		gs, err := s.getConnection(agent)
-		if err != nil {
-			acc.AddError(Errorf(err, "agent %s", agent))
-			continue
-		}
+	jobQueue := make(jobQueue, 100)
+	resultQueue := make(resultQueue, 100)
 
-		// First is the top-level fields. We treat the fields as table prefixes with an empty index.
-		t := Table{
-			Name:   s.Name,
-			Fields: s.Fields,
-		}
-		topTags := map[string]string{}
-		if err := s.gatherTable(acc, gs, t, topTags, false); err != nil {
-			acc.AddError(Errorf(err, "agent %s", agent))
-		}
+	// Setup worker wait group
+	workersGroup := sync.WaitGroup{}
+	workersGroup.Add(s.Workers)
 
-		// Now is the real tables.
-		for _, t := range s.Tables {
-			if err := s.gatherTable(acc, gs, t, topTags, true); err != nil {
-				acc.AddError(Errorf(err, "agent %s: gathering table %s", agent, t.Name))
-			}
+	workers := make([]snmpWorker, s.Workers, s.Workers)
+
+	for i := 0; i < s.Workers; i++ {
+		workers[i] = snmpWorker{
+			jobs:    jobQueue,
+			results: resultQueue,
+			wg:      &workersGroup,
 		}
+		go workers[i].Gather(s.Name, s.Fields, s.Tables)
 	}
 
-	return nil
-}
+	// Setup result handler wait group
+	resultGroup := sync.WaitGroup{}
+	resultGroup.Add(1)
 
-func (s *Snmp) gatherTable(acc telegraf.Accumulator, gs snmpConnection, t Table, topTags map[string]string, walk bool) error {
-	rt, err := t.Build(gs, walk)
-	if err != nil {
-		return err
-	}
-
-	for _, tr := range rt.Rows {
-		if !walk {
-			// top-level table. Add tags to topTags.
-			for k, v := range tr.Tags {
-				topTags[k] = v
-			}
-		} else {
-			// real table. Inherit any specified tags.
-			for _, k := range t.InheritTags {
-				if v, ok := topTags[k]; ok {
-					tr.Tags[k] = v
+	// This go routine receives results from the workers started above, and
+	// adds them to the Accumulator. This is done, rather than having the
+	// workers do it, because I couldn't find evidence that AddFields is
+	// thread-safe.
+	go func(wg *sync.WaitGroup, resultQueue chan workerResult, acc telegraf.Accumulator) {
+		defer wg.Done()
+		for r := range resultQueue {
+			if r.IsError() {
+				acc.AddError(r.Err)
+			} else {
+				rt := r.Result
+				for _, tr := range rt.Rows {
+					log.Printf("Adding %s: %+v (tags: %s) (time: %s)", rt.Name, tr.Fields, tr.Tags, rt.Time.String())
+					acc.AddFields(rt.Name, tr.Fields, tr.Tags, rt.Time)
 				}
 			}
 		}
-		if _, ok := tr.Tags["agent_host"]; !ok {
-			tr.Tags["agent_host"] = gs.Host()
+	}(&resultGroup, resultQueue, acc)
+
+	// Add agents to the work queue..
+	for _, agent := range s.Agents {
+		if conn, err := s.getConnection(agent); err != nil {
+			resultQueue <- workerResult{Err: Errorf(err, "agent %s", agent)}
+			continue
+		} else {
+			jobQueue <- conn
 		}
-		acc.AddFields(rt.Name, tr.Fields, tr.Tags, rt.Time)
 	}
+
+	// Signal end of work..
+	close(jobQueue)
+
+	// Wait for workers to finish..
+	workersGroup.Wait()
+
+	// Signal end of results..
+	close(resultQueue)
+
+	// Wait for result handler to finish.
+	resultGroup.Wait()
 
 	return nil
 }
